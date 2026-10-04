@@ -11,3 +11,10 @@ export class InvalidIdempotencyKeyError extends DomainError {
     super(`Invalid Idempotency-Key: ${reason}`);
   }
 }
+
+/** Raised by the repository when the idempotency key already exists (unique index). */
+export class DuplicateIdempotencyKeyError extends DomainError {
+  constructor(readonly idempotencyKey: string) {
+    super('Idempotency key already exists');
+  }
+}

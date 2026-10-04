@@ -1,9 +1,9 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { AppConfig, APP_CONFIG } from '../../config/configuration';
 import { Clock, CLOCK } from '../../shared/clock';
-import { isDuplicateKeyError } from '../../shared/mongo-errors';
 import { EventStatus, IncomingEvent } from '../domain/event';
-import { IdempotencyConflictError } from '../domain/errors';
+import { DuplicateIdempotencyKeyError, IdempotencyConflictError } from '../domain/errors';
+import { StorageUnavailableError } from '../../shared/errors';
 import { hashPayload, resolveIdempotencyKey } from '../domain/idempotency-key';
 import { computeAvailableAt } from '../domain/reorder-window';
 import { EventRepository, EVENT_REPOSITORY } from './event.repository';
@@ -37,9 +37,10 @@ export class IngestEventUseCase {
       });
       return { eventId, status: 'pending', duplicate: false };
     } catch (err) {
-      if (!isDuplicateKeyError(err)) throw err;
+      if (!(err instanceof DuplicateIdempotencyKeyError)) throw err;
       const existing = await this.events.findByIdempotencyKey(idempotencyKey);
-      if (!existing) throw err; // should not happen; surfaces as 500
+      // The original exists but is not majority-committed yet: never 2xx on it, ask for a retry.
+      if (!existing) throw new StorageUnavailableError('original event not yet durable');
       if (existing.payloadHash !== payloadHash) throw new IdempotencyConflictError(idempotencyKey);
       return { eventId: existing.id, status: existing.status, duplicate: true };
     }

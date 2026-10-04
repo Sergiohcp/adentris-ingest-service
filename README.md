@@ -26,6 +26,8 @@ npm ci
 npm run dev:api        # and, in another terminal:
 npm run dev:worker
 npm test               # unit + integration (downloads a mongod binary on first run)
+npm run lint           # ESLint (no `any`, domain code may not import NestJS/MongoDB)
+npm run typecheck      # src, tests and scripts
 ```
 
 ## Architecture
@@ -85,7 +87,7 @@ src/database/     MongoClient provider, index bootstrap
 
 **Reorder window and `outOfOrder`.** An event becomes eligible at `clamp(ts + REORDER_WINDOW_MS, receivedAt, receivedAt + REORDER_WINDOW_MS)`, so delays shorter than the window are reordered for free. Later arrivals are still processed but flagged `outOfOrder: true` (visible on the event and in `/stats`), never silently. Actually correcting prior state needs domain logic and replay (see below).
 
-**Blocked lane on a poison event.** After `MAX_ATTEMPTS` (exponential backoff, full jitter) the event becomes `failed` and its patient's lane stays blocked rather than skipping ahead, because skipping would break the sequence. Correctness over availability; surfaced by `/stats.blockedLanes`.
+**Blocked lane on a poison event.** After `MAX_ATTEMPTS` (exponential backoff, full jitter) the event becomes `failed` and its patient's lane stays blocked rather than skipping ahead, because skipping would break the sequence. Correctness over availability; surfaced by `/stats.blockedLanes`. The events queued behind a blocked head are parked (`availableAt` set to a far-future sentinel), and events behind a head in backoff are deferred to the head's `availableAt`. Without this they would stay "eligible" forever, making workers spin on lanes they cannot advance and, being the oldest rows, crowd healthy patients out of the eligibility scan.
 
 **API/worker split.** Different scaling profiles and failure domains; a worker deploy or crash does not stop ingestion.
 
@@ -117,10 +119,10 @@ npm run verify                         # waits for the queue to drain, then chec
 | `ts` non-decreasing per patient except flagged `outOfOrder` | ordering (and that late arrivals are flagged iff they are late) |
 | `[startedAt, processedAt]` intervals never overlap per patient | serialisation |
 
-Sample result from a local run (2 workers, 120 s at 1000/min, three worker `SIGKILL`s, defaults otherwise):
+Sample result from a local run (2 workers, 120 s at 1000/min, three worker `SIGKILL`s hitting both workers, defaults otherwise):
 
 ```
-2000 logical events, 300 patients, 2200 HTTP requests (all 202), http p50=5.8ms p95=14.7ms
+2000 logical events at 1000/min, 300 patients, 2187 HTTP requests (all 202), http p50=6.2ms p95=15.0ms
 PASS every logical event got exactly one distinct eventId
 PASS nothing lost: every acknowledged event exists and is done
 PASS nothing duplicated: 2000 documents for 2000 logical events
@@ -128,17 +130,17 @@ PASS per patient, appliedSeq is contiguous 1..n
 PASS per patient, ts is non-decreasing except flagged outOfOrder events
 PASS per patient, processing intervals never overlap
 outOfOrder: 126 (shuffle window of 20 s exceeds the 10 s reorder window)
-max attempts on one event: 3 (events interrupted by a kill are re-run once the lease expires)
-end-to-end latency ms: p50=8208 p95=39154 p99=56697
+max attempts on one event: 2 (events interrupted by a kill are re-run once the lease expires)
+end-to-end latency ms: p50=8868 p95=39445 p99=48454
 ```
 
 ## Testing
 
 `npm test` runs unit tests and integration tests against a real single-node MongoDB replica set (`mongodb-memory-server`), because transactions and write concern are the point.
 
-- Unit: canonicalisation and hashing, key resolution, reorder-window clamp, retry policy, config validation.
+- Unit: canonicalisation and hashing, key resolution, reorder-window clamp, retry policy, config validation, ingest use case (duplicate, conflict, original not yet durable → 503).
 - Integration, ingest: `202`/`400`/`413`, 20 concurrent identical POSTs → one document and one `eventId`, `409` on key reuse, `503` + `Retry-After` when MongoDB is unreachable, `GET` semantics.
-- Integration, processing: shuffled input processed in `ts` order with `appliedSeq 1..n`; two workers never overlap on a patient while different patients run concurrently; an abandoned event is finished exactly once after the lease expires; a zombie's completion is rejected and nothing is double counted; retry/backoff, `failed` and blocked lanes; `outOfOrder` flagging; the head is never skipped while in backoff; lane batching; graceful shutdown waits for in-flight work.
+- Integration, processing: shuffled input processed in `ts` order with `appliedSeq 1..n`; two workers never overlap on a patient while different patients run concurrently; an abandoned event is finished exactly once after the lease expires; a zombie's completion is rejected and nothing is double counted; retry/backoff, `failed` and blocked lanes; `outOfOrder` flagging; the head is never skipped while in backoff; lane batching; blocked and backed-off lanes stop looking eligible; a `processing` event only counts as an orphan once its lease must have expired; the processing timeout holds even when the external client ignores the abort signal; graceful shutdown waits for in-flight work.
 
 A `FakeClock` and a `ControllableProcessor` replace time and the external system, so nothing sleeps for 5 s.
 
@@ -179,7 +181,8 @@ Invalid configuration fails fast on boot with every problem listed.
 - A poison event blocks its patient's lane until an operator intervenes.
 - Byte-identical events without an `Idempotency-Key` are merged.
 - Reorder window adds up to `REORDER_WINDOW_MS` of latency; later arrivals are flagged, not corrected.
-- Polling MongoDB instead of a broker; the eligibility query also re-scans `processing` rows so orphans of dead workers are found, so a live lane owned by another worker costs one failed acquire per poll.
+- Polling MongoDB instead of a broker. Orphans of dead workers are found by `status: processing, startedAt <= now - LEASE_MS`; this relies on `PROCESS_TIMEOUT_MS < LEASE_MS` (validated at boot) and on the lease being renewed at every claim.
+- Parking a blocked lane uses a far-future `availableAt`; an operator unblock (future work) must reset it.
 - A second collection for coordination.
 - Orphan re-claims count as attempts, but a crash-looping poison event that kills the worker before it can record a failure is not detected beyond the attempt counter.
 
@@ -190,5 +193,7 @@ Confirm reading B and implement parallel processing with ordered replay; an oper
 ## Implementation notes
 
 - Pinned to NestJS 11 and `mongodb` 6: NestJS 12 is ESM-only (incompatible with the CommonJS build used here) and `mongodb` 7.7 failed its handshake against the test `mongod`.
-- The worker's eligibility query includes `processing` events (the spec only matched `pending`), otherwise an event orphaned by a killed worker would never be picked up again. Found by the crash-recovery integration test.
+- The worker's eligibility query also matches `processing` events older than the lease (the spec only matched `pending`), otherwise an event orphaned by a killed worker would never be picked up again. Found by the crash-recovery integration test.
+- When a duplicate `POST` races an original that is not yet majority-committed, the duplicate gets `503` (retry) instead of a `202` for an event that could still roll back.
+- The application layer never sees MongoDB error codes: the repository translates `E11000` into `DuplicateIdempotencyKeyError`.
 - The lease is renewed before each claim so a worker that lost its lane cannot re-claim an event owned by its successor.

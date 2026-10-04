@@ -2,6 +2,7 @@ import { ArgumentsHost, Catch, ExceptionFilter, HttpException, Logger } from '@n
 import { Response } from 'express';
 import { IdempotencyConflictError, InvalidIdempotencyKeyError } from '../domain/errors';
 import { isUnavailableError } from '../../shared/mongo-errors';
+import { StorageUnavailableError } from '../../shared/errors';
 
 @Catch()
 export class AllExceptionsFilter implements ExceptionFilter {
@@ -14,7 +15,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
       res.status(409).json({ error: 'IDEMPOTENCY_CONFLICT', idempotencyKey: err.idempotencyKey });
     } else if (err instanceof InvalidIdempotencyKeyError) {
       res.status(400).json({ statusCode: 400, error: 'Bad Request', message: err.message });
-    } else if (isUnavailableError(err)) {
+    } else if (err instanceof StorageUnavailableError || isUnavailableError(err)) {
       this.logger.error(`Storage unavailable: ${(err as Error).name}`);
       res.setHeader('Retry-After', '5').status(503).json({ error: 'STORAGE_UNAVAILABLE' });
     } else if (err instanceof HttpException) {

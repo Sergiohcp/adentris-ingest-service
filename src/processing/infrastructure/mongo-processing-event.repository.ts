@@ -5,6 +5,7 @@ import { EVENTS_COLLECTION } from '../../database/mongo.provider';
 import { IngestedEvent } from '../../events/domain/event';
 import { toIngestedEvent } from '../../events/infrastructure/event-mapper';
 import { addMs } from '../../shared/clock';
+import { AppConfig, APP_CONFIG } from '../../config/configuration';
 import { ProcessingEventRepository } from '../application/processing-event.repository';
 import { RetryPolicy } from '../domain/retry-policy';
 
@@ -18,14 +19,22 @@ export class MongoProcessingEventRepository implements ProcessingEventRepository
   constructor(
     @Inject(EVENTS_COLLECTION) private readonly events: Collection<EventDocument>,
     @Inject(RETRY_POLICY) private readonly retryPolicy: RetryPolicy,
+    @Inject(APP_CONFIG) private readonly config: AppConfig,
   ) {}
 
   async findPatientsWithEligibleWork(now: Date, limit: number): Promise<string[]> {
     const rows = await this.events
       .aggregate<{ _id: string }>([
-        // `processing` is included on purpose: it is an orphan if its worker died. A live owner
-        // simply wins the lane first, so the acquire attempt fails and the patient is skipped.
-        { $match: { status: { $in: ['pending', 'processing'] }, availableAt: { $lte: now } } },
+        {
+          $match: {
+            $or: [
+              { status: 'pending', availableAt: { $lte: now } },
+              // Orphan of a dead worker: claims renew the lease and processing is bounded by
+              // PROCESS_TIMEOUT_MS < LEASE_MS, so a live owner never stays this long.
+              { status: 'processing', startedAt: { $lte: addMs(now, -this.config.leaseMs) } },
+            ],
+          },
+        },
         { $sort: { availableAt: 1 } },
         { $limit: ELIGIBILITY_SCAN_LIMIT },
         { $group: { _id: '$patientId', oldest: { $min: '$availableAt' } } },
@@ -34,6 +43,13 @@ export class MongoProcessingEventRepository implements ProcessingEventRepository
       ])
       .toArray();
     return rows.map((row) => row._id);
+  }
+
+  async deferLane(patientId: string, until: Date): Promise<void> {
+    await this.events.updateMany(
+      { patientId, status: 'pending', availableAt: { $lt: until } },
+      { $set: { availableAt: until } },
+    );
   }
 
   async findLaneHead(patientId: string): Promise<IngestedEvent | null> {

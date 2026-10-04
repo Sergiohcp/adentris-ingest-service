@@ -45,20 +45,21 @@ export class WorkerRunner {
   async run(): Promise<void> {
     this.logger.log(`Worker ${this.workerId} started (concurrency=${this.config.workerConcurrency})`);
     while (!this.stopping) {
-      let started = 0;
+      let pollAgain = false;
       try {
-        started = await this.fillFreeSlots();
+        pollAgain = await this.fillFreeSlots();
       } catch (err) {
         this.logger.error(`Poll failed: ${(err as Error).name}`);
       }
-      if (started === 0 && !this.stopping) await sleep(this.config.pollIntervalMs);
+      if (!pollAgain && !this.stopping) await sleep(this.config.pollIntervalMs);
     }
     this.logger.log(`Worker ${this.workerId} stopped acquiring lanes`);
   }
 
-  private async fillFreeSlots(): Promise<number> {
+  /** Returns true when an immediate re-poll is worthwhile (slots were filled and more work may be waiting). */
+  private async fillFreeSlots(): Promise<boolean> {
     const freeSlots = this.config.workerConcurrency - this.inFlight.size;
-    if (freeSlots <= 0) return 0;
+    if (freeSlots <= 0) return false;
 
     let started = 0;
     const patientIds = await this.events.findPatientsWithEligibleWork(this.clock.now(), freeSlots);
@@ -70,7 +71,7 @@ export class WorkerRunner {
       this.track(patientId, this.processLane.execute(lease)); // not awaited: lanes run concurrently
       started++;
     }
-    return started;
+    return started > 0 && patientIds.length >= freeSlots;
   }
 
   private track(patientId: string, work: Promise<void>): void {

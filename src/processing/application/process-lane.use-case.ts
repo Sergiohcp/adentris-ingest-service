@@ -2,7 +2,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { AppConfig, APP_CONFIG } from '../../config/configuration';
 import { IngestedEvent } from '../../events/domain/event';
 import { Clock, CLOCK } from '../../shared/clock';
-import { LaneLease } from '../domain/lane';
+import { BLOCKED_LANE_AVAILABLE_AT, LaneLease } from '../domain/lane';
 import { LeaseLostError } from '../domain/errors';
 import { EventCompletion, EVENT_COMPLETION } from './completion.service';
 import { EventProcessor, EVENT_PROCESSOR, ProcessingResult } from './event-processor';
@@ -33,9 +33,14 @@ export class ProcessLaneUseCase {
         if (!head) break; // lane empty
         if (head.status === 'failed') {
           this.logger.warn(`Lane blocked patient=${head.patientId} event=${head.id} attempts=${head.attempts}`);
+          await this.events.deferLane(lease.patientId, BLOCKED_LANE_AVAILABLE_AT); // stop polling this lane
           break;
         }
-        if (head.availableAt > now) break; // backoff / watermark: never skip the head
+        if (head.availableAt > now) {
+          // Backoff / watermark: never skip the head; park the events queued behind it until then.
+          await this.events.deferLane(lease.patientId, head.availableAt);
+          break;
+        }
 
         // Fence the claim: if the lease was lost we must not touch the event.
         if (!(await this.lanes.renew(lease, now))) throw new LeaseLostError(lease.patientId);
@@ -68,9 +73,19 @@ export class ProcessLaneUseCase {
 
   private async runWithTimeout(event: IngestedEvent): Promise<Outcome> {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(new Error('Processing timed out')), this.config.processTimeoutMs);
+    let timer: NodeJS.Timeout | undefined;
+    // Race the call as well as aborting it: the lease relies on the timeout holding even if the
+    // external client ignores the signal.
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        const error = new Error('Processing timed out');
+        controller.abort(error);
+        reject(error);
+      }, this.config.processTimeoutMs);
+    });
     try {
-      return { ok: true, result: await this.processor.process(event, controller.signal) };
+      const result = await Promise.race([this.processor.process(event, controller.signal), timeout]);
+      return { ok: true, result };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
     } finally {

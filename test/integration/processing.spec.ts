@@ -284,6 +284,58 @@ describe('processing (real MongoDB replica set)', () => {
     });
   });
 
+  describe('eligibility and poll pressure', () => {
+    it('parks the rest of a blocked lane so it no longer looks eligible', async () => {
+      processor.failWhen = () => true;
+      await db.seed({ patientId: 'p1', ts: at('09:00:00') }, clock);
+      const w = await newWorker();
+      const drain = async () => w.processLane.execute((await w.lanes.tryAcquire('p1', 'w', clock.now()))!);
+      for (let i = 0; i < 3; i++) {
+        await drain();
+        clock.advance(config.backoffMaxMs + 1);
+      }
+      const later = await db.seed({ patientId: 'p1', ts: at('09:05:00') }, clock);
+      expect(await w.events.findPatientsWithEligibleWork(clock.now(), 10)).toEqual(['p1']); // new arrival: one look
+
+      await drain(); // finds the failed head and parks the lane
+      expect(await w.events.findPatientsWithEligibleWork(clock.now(), 10)).toEqual([]);
+      expect((await statusOf(later)).status).toBe('pending');
+    });
+
+    it('defers later events behind a head that is waiting (backoff / watermark)', async () => {
+      await db.seed({ patientId: 'p1', ts: at('09:00:00'), availableAt: at('10:00:05') }, clock);
+      const later = await db.seed({ patientId: 'p1', ts: at('09:30:00') }, clock);
+      const w = await newWorker();
+      expect(await w.events.findPatientsWithEligibleWork(clock.now(), 10)).toEqual(['p1']);
+
+      await w.processLane.execute((await w.lanes.tryAcquire('p1', 'w', clock.now()))!);
+      expect(await w.events.findPatientsWithEligibleWork(clock.now(), 10)).toEqual([]);
+      expect((await statusOf(later)).availableAt).toEqual(at('10:00:05'));
+    });
+
+    it('only reports processing events as eligible once their lease must have expired', async () => {
+      const id = await db.seed({ patientId: 'p1', ts: at('09:00:00') }, clock);
+      const w = await newWorker();
+      const lease = (await w.lanes.tryAcquire('p1', 'w', clock.now()))!;
+      await w.events.markProcessing(id.toHexString(), lease.token, clock.now());
+
+      expect(await w.events.findPatientsWithEligibleWork(clock.now(), 10)).toEqual([]); // live owner
+      clock.advance(config.leaseMs + 1);
+      expect(await w.events.findPatientsWithEligibleWork(clock.now(), 10)).toEqual(['p1']); // orphan
+    });
+
+    it('enforces PROCESS_TIMEOUT_MS even if the processor ignores the abort signal', async () => {
+      processor.mode = 'manual';
+      processor.ignoreAbort = true;
+      const id = await db.seed({ patientId: 'p1', ts: at('09:00:00') }, clock);
+      const w = await createWorker({ ...config, processTimeoutMs: 100 }, clock, processor);
+      workers.push(w);
+      await w.processLane.execute((await w.lanes.tryAcquire('p1', 'w', clock.now()))!);
+      expect(await statusOf(id)).toMatchObject({ status: 'pending', attempts: 1, lastError: 'Processing timed out' });
+      processor.resolveNext(); // the stray call finishing late changes nothing
+    });
+  });
+
   describe('graceful shutdown', () => {
     it('lets the in-flight event complete before stop() resolves', async () => {
       processor.mode = 'manual';

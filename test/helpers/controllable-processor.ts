@@ -17,6 +17,8 @@ export class ControllableProcessor implements EventProcessor {
   mode: 'auto' | 'manual' = 'auto';
   autoDelayMs = 5;
   failWhen: (event: IngestedEvent) => boolean = () => false;
+  /** Simulates an external client that does not honour AbortSignal. */
+  ignoreAbort = false;
 
   readonly started: IngestedEvent[] = [];
   readonly waiting: Deferred[] = [];
@@ -36,7 +38,7 @@ export class ControllableProcessor implements EventProcessor {
       if (this.mode === 'manual') {
         return await new Promise<ProcessingResult>((resolve, reject) => {
           this.waiting.push({ event, resolve, reject });
-          signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+          if (!this.ignoreAbort) signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
         });
       }
       await sleep(this.autoDelayMs, signal);

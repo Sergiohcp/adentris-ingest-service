@@ -1,0 +1,48 @@
+{
+  "name": "adentris-ingest-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Patient event ingestion service (NestJS + MongoDB)",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "nest build",
+    "start:api": "node dist/main.api.js",
+    "start:worker": "node dist/main.worker.js",
+    "dev:api": "nest start --watch --entryFile main.api",
+    "dev:worker": "nest start --watch --entryFile main.worker",
+    "test": "jest",
+    "test:unit": "jest --selectProjects unit",
+    "test:integration": "jest --selectProjects integration --runInBand",
+    "load": "tsx scripts/load.ts",
+    "verify": "tsx scripts/verify.ts",
+    "chaos": "bash scripts/chaos.sh"
+  },
+  "dependencies": {
+    "@nestjs/common": "12.1.2",
+    "@nestjs/config": "12.0.1",
+    "@nestjs/core": "12.1.2",
+    "@nestjs/platform-express": "12.1.2",
+    "@nestjs/terminus": "12.1.0",
+    "class-transformer": "0.5.1",
+    "class-validator": "0.15.1",
+    "mongodb": "7.7.0",
+    "reflect-metadata": "0.2.2",
+    "rxjs": "7.8.2"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "12.0.8",
+    "@nestjs/testing": "12.1.2",
+    "@types/express": "5.0.6",
+    "@types/jest": "30.0.0",
+    "@types/node": "22.20.5",
+    "@types/supertest": "7.2.1",
+    "jest": "30.5.2",
+    "mongodb-memory-server": "11.3.0",
+    "supertest": "7.3.1",
+    "ts-jest": "29.4.14",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  }
+}

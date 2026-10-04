@@ -1,0 +1,35 @@
+x-app: &app
+  image: ingest-service:local
+  build: .
+  restart: unless-stopped
+  depends_on:
+    mongo:
+      condition: service_healthy
+  environment:
+    MONGO_URI: mongodb://mongo:27017/ingest?replicaSet=rs0
+
+services:
+  mongo:
+    image: mongo:7
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    ports: ["27017:27017"]
+    volumes: [mongo-data:/data/db]
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval \"try { rs.status().ok } catch (e) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongo:27017'}]}).ok }\""]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  api:
+    <<: *app
+    command: ["node", "dist/main.api.js"]
+    ports: ["3000:3000"]
+
+  worker:
+    <<: *app
+    command: ["node", "dist/main.worker.js"]
+    stop_grace_period: 30s
+
+volumes:
+  mongo-data:

@@ -13,7 +13,7 @@ module.exports = {
       ...base,
       displayName: 'integration',
       testMatch: ['<rootDir>/test/integration/**/*.spec.ts'],
-      testTimeout: 60000,
+      setupFilesAfterEnv: ['<rootDir>/test/helpers/jest-setup.ts'],
     },
   ],
 };

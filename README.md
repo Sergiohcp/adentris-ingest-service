@@ -4,6 +4,8 @@ A NestJS + MongoDB service that accepts patient events over HTTP, answers immedi
 
 ## Quick start
 
+> Step-by-step instructions for running, testing every scenario by hand and inspecting the data: [docs/TESTING.md](docs/TESTING.md).
+
 ```bash
 docker compose up --build                 # MongoDB (replica set) + API + worker
 docker compose up --build --scale worker=2   # two workers
@@ -135,6 +137,8 @@ end-to-end latency ms: p50=8868 p95=39445 p99=48454
 ```
 
 ## Testing
+
+See [docs/TESTING.md](docs/TESTING.md) for the full guide (manual scenarios, load/chaos proof, browsing MongoDB).
 
 `npm test` runs unit tests and integration tests against a real single-node MongoDB replica set (`mongodb-memory-server`), because transactions and write concern are the point.
 

@@ -4,4 +4,3 @@ coverage
 *.tsbuildinfo
 .env
 sent.jsonl
-.superpowers
